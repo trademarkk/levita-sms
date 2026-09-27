@@ -1,0 +1,1 @@
+{"name":"amo-moizvonki-sms","version":"1.0.0","private":true,"type":"module","scripts":{"test":"node test/service.test.js","check":"node --check api/webhook.js && node --check api/oauth-redirect.js && node --check src/service.js"},"engines":{"node":">=20"}}
