@@ -57,9 +57,15 @@ export async function sendSms(phone, message, route) {
 export async function handle(req, env) {
   if (req.method !== 'POST') return { status: 405, body: { error: 'method_not_allowed' } };
   const secret = required(env, 'WEBHOOK_SECRET');
-  if (req.query?.key !== secret) return { status: 401, body: { error: 'unauthorized' } };
+  if (req.query?.key !== secret) {
+    console.warn(JSON.stringify({ event: 'webhook_rejected', reason: 'invalid_secret' }));
+    return { status: 401, body: { error: 'unauthorized' } };
+  }
   const events = parseEvents(req.body);
-  if (!events.length) return { status: 200, body: { processed: 0 } };
+  if (!events.length) {
+    console.info(JSON.stringify({ event: 'webhook_result', processed: 0, reason: 'no_supported_lead_events' }));
+    return { status: 200, body: { processed: 0 } };
+  }
   const token = required(env, 'AMO_LONG_LIVED_TOKEN');
   const base = cleanBase(required(env, 'AMO_BASE_URL'));
   const results = [];
@@ -93,5 +99,6 @@ export async function handle(req, env) {
       results.push({ id, state: 'error' });
     }
   }
+  console.info(JSON.stringify({ event: 'webhook_result', results }));
   return { status: 200, body: { results } };
 }
