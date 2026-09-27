@@ -45,6 +45,23 @@ test('uses a long-lived amoCRM token and sends once per webhook batch', async ()
     assert.equal(calls.filter(call => call.url.includes('moizvonki.ru')).length, 1, 'a later webhook can send another SMS without persistent deduplication');
   } finally { globalThis.fetch = original; }
 });
+test('uses one default sender when studio is not known yet', async () => {
+  const original = globalThis.fetch;
+  let smsCalls = 0;
+  globalThis.fetch = async (url, options) => {
+    if (url.includes('/api/v4/leads/123')) return new Response(JSON.stringify({ pipeline_id: 1, status_id: 2, _embedded: { contacts: [{ id: 9, is_main: true }] } }), { status: 200 });
+    if (url.includes('/api/v4/contacts/9')) return new Response(JSON.stringify({ custom_fields_values: [{ field_code: 'PHONE', values: [{ value: '+7 918 123 45 67' }] }] }), { status: 200 });
+    assert.equal(JSON.parse(options.body).user_name, 'sender@example.com');
+    smsCalls++;
+    return new Response('{}', { status: 200 });
+  };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку' };
+  try {
+    const response = await handle({ method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({ 'leads[add][0][id]': '123' }) }, env);
+    assert.equal(response.body.results[0].state, 'accepted');
+    assert.equal(smsCalls, 1);
+  } finally { globalThis.fetch = original; }
+});
 test('does not use another studio route for an unknown field value', async () => {
   const original = globalThis.fetch;
   let smsCalls = 0;
