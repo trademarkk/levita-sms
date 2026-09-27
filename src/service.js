@@ -79,7 +79,12 @@ export async function handle(req, env) {
       // A status ID identifies its pipeline; use the event when the deal has moved since delivery.
       const pipelineId = event.pipeline_id ?? (event.status_id ? required(env, 'AMO_PIPELINE_ID') : lead.pipeline_id);
       const statusId = event.status_id ?? lead.status_id;
-      if (String(pipelineId) !== String(required(env, 'AMO_PIPELINE_ID')) || String(statusId) !== String(required(env, 'AMO_STATUS_ID'))) { results.push({ id, state: 'ignored_stage' }); continue; }
+      const expectedPipelineId = required(env, 'AMO_PIPELINE_ID');
+      const expectedStatusId = required(env, 'AMO_STATUS_ID');
+      if (String(pipelineId) !== String(expectedPipelineId) || String(statusId) !== String(expectedStatusId)) {
+        results.push({ id, state: 'ignored_stage', action: event.action, eventPipelineId: event.pipeline_id ?? null, eventStatusId: event.status_id ?? null, leadPipelineId: lead.pipeline_id, leadStatusId: lead.status_id, expectedPipelineId, expectedStatusId });
+        continue;
+      }
       const contacts = lead._embedded?.contacts ?? [];
       const contact = contacts.find(c => c.is_main) ?? contacts[0];
       if (!contact) { results.push({ id, state: 'no_contact' }); continue; }

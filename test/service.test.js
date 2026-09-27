@@ -128,6 +128,7 @@ test('ignores an event from another stage even if the deal is now in New', async
     const otherStage = new URLSearchParams({ 'leads[status][0][id]': '123', 'leads[status][0][pipeline_id]': '1', 'leads[status][0][status_id]': '3' });
     const result = await handle({ method: 'POST', query: { key: 'secret' }, body: otherStage }, env);
     assert.equal(result.body.results[0].state, 'ignored_stage');
+    assert.deepEqual({ eventStatusId: result.body.results[0].eventStatusId, leadStatusId: result.body.results[0].leadStatusId, expectedStatusId: result.body.results[0].expectedStatusId }, { eventStatusId: '3', leadStatusId: 2, expectedStatusId: '2' });
     assert.equal(smsCalls, 0);
   } finally { globalThis.fetch = original; }
 });
