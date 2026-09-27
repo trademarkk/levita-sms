@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEvents, normalizePhone, sendSms, handle } from '../src/service.js';
+import { parseEvents, normalizePhone, selectSmsText, sendSms, handle } from '../src/service.js';
 
 test('parses amoCRM form webhook batch', () => {
   const input = new URLSearchParams({ 'leads[add][0][id]': '123', 'leads[status][1][id]': '456', 'leads[status][1][status_id]': '789', 'contacts[add][0][id]': '777' });
@@ -10,6 +10,23 @@ test('normalizes Russian phone and rejects invalid numbers', () => {
   assert.equal(normalizePhone('8 (918) 123-45-67'), '79181234567');
   assert.equal(normalizePhone('+7 918 123 45 67'), '79181234567');
   assert.equal(normalizePhone('12345'), null);
+});
+test('selects SMS by amoCRM event time in Krasnodar at every schedule boundary', () => {
+  const env = { SMS_TEXT: 'Рабочее время', SMS_TEXT_AFTER_HOURS: 'Нерабочее время' };
+  const cases = [
+    ['2026-09-27T06:59:00Z', 'after_hours'], // 09:59 MSK
+    ['2026-09-27T07:00:00Z', 'work_hours'],  // 10:00 MSK
+    ['2026-09-27T18:29:00Z', 'work_hours'], // 21:29 MSK
+    ['2026-09-27T18:30:00Z', 'after_hours'], // 21:30 MSK
+    ['2026-09-27T21:00:00Z', 'after_hours']  // 00:00 MSK
+  ];
+  for (const [iso, slot] of cases) {
+    const event = { action: 'add', date_create: String(Date.parse(iso) / 1000) };
+    assert.equal(selectSmsText(event, {}, env).slot, slot, iso);
+  }
+  const statusEvent = { action: 'status', date_create: String(Date.parse('2026-09-27T07:00:00Z') / 1000), last_modified: String(Date.parse('2026-09-27T18:30:00Z') / 1000) };
+  assert.deepEqual(selectSmsText(statusEvent, {}, env), { text: 'Нерабочее время', slot: 'after_hours' });
+  assert.match(selectSmsText({ action: 'add' }, {}, { SMS_TEXT: 'Рабочее время' }, Date.parse('2026-09-27T06:59:00Z')).text, /после 10:00/);
 });
 test('sends the documented МоиЗвонки request', async () => {
   const original = globalThis.fetch;
@@ -52,12 +69,13 @@ test('uses one default sender when studio is not known yet', async () => {
     if (url.includes('/api/v4/leads/123')) return new Response(JSON.stringify({ pipeline_id: 1, status_id: 2, _embedded: { contacts: [{ id: 9, is_main: true }] } }), { status: 200 });
     if (url.includes('/api/v4/contacts/9')) return new Response(JSON.stringify({ custom_fields_values: [{ field_code: 'PHONE', values: [{ value: '+7 918 123 45 67' }] }] }), { status: 200 });
     assert.equal(JSON.parse(options.body).user_name, 'sender@example.com');
+    assert.equal(JSON.parse(options.body).text, 'Нерабочее время');
     smsCalls++;
     return new Response('{}', { status: 200 });
   };
-  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку' };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Рабочее время', SMS_TEXT_AFTER_HOURS: 'Нерабочее время' };
   try {
-    const response = await handle({ method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({ 'leads[add][0][id]': '123' }) }, env);
+    const response = await handle({ method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({ 'leads[add][0][id]': '123', 'leads[add][0][date_create]': String(Date.parse('2026-09-27T18:30:00Z') / 1000) }) }, env);
     assert.equal(response.body.results[0].state, 'accepted');
     assert.equal(smsCalls, 1);
   } finally { globalThis.fetch = original; }

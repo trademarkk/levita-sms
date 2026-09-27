@@ -6,7 +6,7 @@ export function parseEvents(body) {
   const params = typeof body === 'string' ? new URLSearchParams(body) : body instanceof URLSearchParams ? body : new URLSearchParams(Object.entries(body ?? {}).flatMap(([k,v]) => typeof v === 'string' ? [[k,v]] : []));
   const events = [];
   for (const [key, value] of params) {
-    const match = /^leads\[(add|status)\]\[(\d+)\]\[(id|status_id)\]$/.exec(key);
+    const match = /^leads\[(add|status)\]\[(\d+)\]\[(id|status_id|date_create|created_at|last_modified|updated_at)\]$/.exec(key);
     if (!match) continue;
     const [, action, index, field] = match;
     let item = events.find(x => x.action === action && x.index === index);
@@ -23,6 +23,22 @@ async function jsonFetch(url, options = {}) {
   return body;
 }
 function fieldValue(fields, id) { return fields?.find(f => String(f.field_id) === String(id))?.values?.[0]?.value; }
+const DEFAULT_AFTER_HOURS_TEXT = 'LEVITA: заявку получили. Сейчас не работаем. Свяжемся после 10:00.';
+function unixTimeMs(value) {
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+}
+export function selectSmsText(event, lead, env, now = Date.now()) {
+  const eventTime = event.action === 'add'
+    ? unixTimeMs(event.date_create) ?? unixTimeMs(event.created_at) ?? unixTimeMs(lead.created_at)
+    : unixTimeMs(event.last_modified) ?? unixTimeMs(event.updated_at);
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(eventTime ?? now));
+  const hour = Number(parts.find(part => part.type === 'hour').value);
+  const minute = Number(parts.find(part => part.type === 'minute').value);
+  const minuteOfDay = hour * 60 + minute;
+  if (minuteOfDay >= 10 * 60 && minuteOfDay < 21 * 60 + 30) return { text: required(env, 'SMS_TEXT'), slot: 'work_hours' };
+  return { text: env.SMS_TEXT_AFTER_HOURS?.trim() || DEFAULT_AFTER_HOURS_TEXT, slot: 'after_hours' };
+}
 function routeFor(lead, env) {
   const routes = JSON.parse(required(env, 'STUDIO_ROUTES_JSON'));
   const key = env.STUDIO_FIELD_ID ? String(fieldValue(lead.custom_fields_values, env.STUDIO_FIELD_ID) ?? '') : 'default';
@@ -63,12 +79,13 @@ export async function handle(req, env) {
       const phone = normalizePhone(phoneField?.values?.[0]?.value);
       if (!phone) { results.push({ id, state: 'invalid_phone' }); continue; }
       const { route, key } = routeFor(lead, env);
+      const { text: smsText, slot } = selectSmsText(event, lead, env);
       try {
-        await sendSms(phone, required(env, 'SMS_TEXT'), route);
-        console.info(JSON.stringify({ event: 'sms_accepted', leadId: id, studio: key }));
+        await sendSms(phone, smsText, route);
+        console.info(JSON.stringify({ event: 'sms_accepted', leadId: id, studio: key, slot }));
         results.push({ id, state: 'accepted' });
       } catch (error) {
-        console.error(JSON.stringify({ event: 'sms_review_required', leadId: id, studio: key, message: error.message }));
+        console.error(JSON.stringify({ event: 'sms_review_required', leadId: id, studio: key, slot, message: error.message }));
         results.push({ id, state: 'review_required' });
       }
     } catch (error) {
