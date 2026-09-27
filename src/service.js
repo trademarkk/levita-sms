@@ -6,7 +6,7 @@ export function parseEvents(body) {
   const params = typeof body === 'string' ? new URLSearchParams(body) : body instanceof URLSearchParams ? body : new URLSearchParams(Object.entries(body ?? {}).flatMap(([k,v]) => typeof v === 'string' ? [[k,v]] : []));
   const events = [];
   for (const [key, value] of params) {
-    const match = /^leads\[(add|status)\]\[(\d+)\]\[(id|status_id|date_create|created_at|last_modified|updated_at)\]$/.exec(key);
+    const match = /^leads\[(add|status)\]\[(\d+)\]\[(id|pipeline_id|status_id|date_create|created_at|last_modified|updated_at)\]$/.exec(key);
     if (!match) continue;
     const [, action, index, field] = match;
     let item = events.find(x => x.action === action && x.index === index);
@@ -76,7 +76,10 @@ export async function handle(req, env) {
     seen.add(id);
     try {
       const lead = await jsonFetch(`${base}/api/v4/leads/${id}?with=contacts`, { headers: { Authorization: `Bearer ${token}` } });
-      if (String(lead.pipeline_id) !== String(required(env, 'AMO_PIPELINE_ID')) || String(lead.status_id) !== String(required(env, 'AMO_STATUS_ID'))) { results.push({ id, state: 'ignored_stage' }); continue; }
+      // A status ID identifies its pipeline; use the event when the deal has moved since delivery.
+      const pipelineId = event.pipeline_id ?? (event.status_id ? required(env, 'AMO_PIPELINE_ID') : lead.pipeline_id);
+      const statusId = event.status_id ?? lead.status_id;
+      if (String(pipelineId) !== String(required(env, 'AMO_PIPELINE_ID')) || String(statusId) !== String(required(env, 'AMO_STATUS_ID'))) { results.push({ id, state: 'ignored_stage' }); continue; }
       const contacts = lead._embedded?.contacts ?? [];
       const contact = contacts.find(c => c.is_main) ?? contacts[0];
       if (!contact) { results.push({ id, state: 'no_contact' }); continue; }
