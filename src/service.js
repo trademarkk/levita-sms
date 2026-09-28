@@ -54,18 +54,24 @@ export async function sendSms(phone, message, route) {
   const result = await jsonFetch(route.apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return result;
 }
-export async function handle(req, env) {
-  if (req.method !== 'POST') return { status: 405, body: { error: 'method_not_allowed' } };
+export function prepareWebhook(req, env) {
+  if (req.method !== 'POST') return { response: { status: 405, body: { error: 'method_not_allowed' } } };
   const secret = required(env, 'WEBHOOK_SECRET');
   if (req.query?.key !== secret) {
     console.warn(JSON.stringify({ event: 'webhook_rejected', reason: 'invalid_secret' }));
-    return { status: 401, body: { error: 'unauthorized' } };
+    return { response: { status: 401, body: { error: 'unauthorized' } } };
   }
   const events = parseEvents(req.body);
   if (!events.length) {
     console.info(JSON.stringify({ event: 'webhook_result', processed: 0, reason: 'no_supported_lead_events' }));
-    return { status: 200, body: { processed: 0 } };
+    return { response: { status: 200, body: { processed: 0 } } };
   }
+  return { events };
+}
+export async function handle(req, env, { smsGuard, receivedAt = Date.now() } = {}) {
+  const prepared = prepareWebhook(req, env);
+  if (prepared.response) return prepared.response;
+  const { events } = prepared;
   const token = required(env, 'AMO_LONG_LIVED_TOKEN');
   const base = cleanBase(required(env, 'AMO_BASE_URL'));
   const results = [];
@@ -74,6 +80,7 @@ export async function handle(req, env) {
     const id = event.id;
     if (seen.has(id)) { results.push({ id, state: 'duplicate_in_batch' }); continue; }
     seen.add(id);
+    let step = 'lead_read';
     try {
       const lead = await jsonFetch(`${base}/api/v4/leads/${id}?with=contacts`, { headers: { Authorization: `Bearer ${token}` } });
       // A status ID identifies its pipeline; use the event when the deal has moved since delivery.
@@ -88,13 +95,22 @@ export async function handle(req, env) {
       const contacts = lead._embedded?.contacts ?? [];
       const contact = contacts.find(c => c.is_main) ?? contacts[0];
       if (!contact) { results.push({ id, state: 'no_contact' }); continue; }
+      step = 'contact_read';
       const person = await jsonFetch(`${base}/api/v4/contacts/${contact.id}`, { headers: { Authorization: `Bearer ${token}` } });
       const phoneField = person.custom_fields_values?.find(f => f.field_code === 'PHONE');
       const phone = normalizePhone(phoneField?.values?.[0]?.value);
       if (!phone) { results.push({ id, state: 'invalid_phone' }); continue; }
+      step = 'sender_selection';
       const { route, key } = routeFor(lead, env);
-      const { text: smsText, slot } = selectSmsText(event, lead, env);
+      const { text: smsText, slot } = selectSmsText(event, lead, env, receivedAt);
+      // This guard is shared by requests in ONE warm function instance, not a database.
+      step = 'duplicate_check';
+      if (smsGuard && !smsGuard.claim(`${base}/leads/${id}`)) {
+        results.push({ id, state: 'duplicate_in_instance' });
+        continue;
+      }
       try {
+        console.info(JSON.stringify({ event: 'sms_dispatch_started', leadId: id, studio: key, slot }));
         await sendSms(phone, smsText, route);
         console.info(JSON.stringify({ event: 'sms_accepted', leadId: id, studio: key, slot }));
         results.push({ id, state: 'accepted' });
@@ -103,7 +119,7 @@ export async function handle(req, env) {
         results.push({ id, state: 'review_required' });
       }
     } catch (error) {
-      console.error(JSON.stringify({ event: 'lead_error', leadId: id, message: error.message }));
+      console.error(JSON.stringify({ event: 'lead_error', leadId: id, step, message: error.message }));
       results.push({ id, state: 'error' });
     }
   }
