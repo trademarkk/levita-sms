@@ -6,7 +6,7 @@ import { createSmsGuard } from '../src/sms-guard.js';
 const settings = {
   WEBHOOK_SECRET: 'test-secret', AMO_BASE_URL: 'https://example.amocrm.ru',
   AMO_LONG_LIVED_TOKEN: 'test-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2',
-  SMS_TEXT: 'Test SMS', SMS_TEXT_AFTER_HOURS: 'Night SMS',
+  SMS_TEXT: 'Test SMS', SMS_TEXT_MORNING: 'Morning SMS', SMS_TEXT_AFTER_HOURS: 'Night SMS',
   STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'test@example.com', apiKey: 'test-api-key' } })
 };
 const request = () => ({ method: 'POST', query: { key: 'test-secret' }, body: new URLSearchParams({

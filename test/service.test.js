@@ -11,22 +11,29 @@ test('normalizes Russian phone and rejects invalid numbers', () => {
   assert.equal(normalizePhone('+7 918 123 45 67'), '79181234567');
   assert.equal(normalizePhone('12345'), null);
 });
-test('selects SMS by amoCRM event time in Krasnodar at every schedule boundary', () => {
-  const env = { SMS_TEXT: 'Рабочее время', SMS_TEXT_AFTER_HOURS: 'Нерабочее время' };
+test('selects the correct SMS at every Moscow-time schedule boundary', () => {
+  const env = { SMS_TEXT: 'День', SMS_TEXT_MORNING: 'Утро', SMS_TEXT_AFTER_HOURS: 'Ночь' };
   const cases = [
-    ['2026-09-27T06:59:00Z', 'after_hours'], // 09:59 MSK
-    ['2026-09-27T07:00:00Z', 'work_hours'],  // 10:00 MSK
-    ['2026-09-27T18:29:00Z', 'work_hours'], // 21:29 MSK
-    ['2026-09-27T18:30:00Z', 'after_hours'], // 21:30 MSK
-    ['2026-09-27T21:00:00Z', 'after_hours']  // 00:00 MSK
+    ['2026-09-28T00:00:00+03:00', 'after_hours', 'Ночь'],
+    ['2026-09-28T06:00:59+03:00', 'after_hours', 'Ночь'],
+    ['2026-09-28T06:01:00+03:00', 'morning', 'Утро'],
+    ['2026-09-28T09:50:59+03:00', 'morning', 'Утро'],
+    ['2026-09-28T09:51:00+03:00', 'work_hours', 'День'],
+    ['2026-09-28T21:29:59+03:00', 'work_hours', 'День'],
+    ['2026-09-28T21:30:00+03:00', 'after_hours', 'Ночь'],
+    ['2026-09-28T23:59:59+03:00', 'after_hours', 'Ночь']
   ];
-  for (const [iso, slot] of cases) {
+  for (const [iso, slot, text] of cases) {
     const event = { action: 'add', date_create: String(Date.parse(iso) / 1000) };
-    assert.equal(selectSmsText(event, {}, env).slot, slot, iso);
+    assert.deepEqual(selectSmsText(event, {}, env), { text, slot }, iso);
   }
-  const statusEvent = { action: 'status', date_create: String(Date.parse('2026-09-27T07:00:00Z') / 1000), last_modified: String(Date.parse('2026-09-27T18:30:00Z') / 1000) };
-  assert.deepEqual(selectSmsText(statusEvent, {}, env), { text: 'Нерабочее время', slot: 'after_hours' });
-  assert.match(selectSmsText({ action: 'add' }, {}, { SMS_TEXT: 'Рабочее время' }, Date.parse('2026-09-27T06:59:00Z')).text, /после 10:00/);
+  const statusEvent = { action: 'status', date_create: String(Date.parse('2026-09-28T12:00:00+03:00') / 1000), last_modified: String(Date.parse('2026-09-28T06:01:00+03:00') / 1000) };
+  assert.deepEqual(selectSmsText(statusEvent, {}, env), { text: 'Утро', slot: 'morning' }, 'status changes use the change time, not deal creation time');
+  assert.deepEqual(selectSmsText({ action: 'status' }, {}, env, Date.parse('2026-09-28T09:51:00+03:00')), { text: 'День', slot: 'work_hours' }, 'missing event time uses webhook receipt time');
+  assert.deepEqual(selectSmsText({ action: 'add' }, { created_at: Date.parse('2026-09-28T21:30:00+03:00') / 1000 }, env), { text: 'Ночь', slot: 'after_hours' }, 'new deal falls back to lead creation time');
+  assert.match(selectSmsText({ action: 'add' }, {}, { SMS_TEXT: 'День' }, Date.parse('2026-09-28T06:00:00+03:00')).text, /после 10:00/);
+  assert.throws(() => selectSmsText({ action: 'add' }, {}, { SMS_TEXT: 'День' }, Date.parse('2026-09-28T06:01:00+03:00')), /Missing SMS_TEXT_MORNING/);
+  assert.throws(() => selectSmsText({ action: 'add' }, {}, { SMS_TEXT_MORNING: '   ' }, Date.parse('2026-09-28T06:01:00+03:00')), /Missing SMS_TEXT_MORNING/);
 });
 test('sends the documented МоиЗвонки request', async () => {
   const original = globalThis.fetch;
@@ -49,7 +56,7 @@ test('uses a long-lived amoCRM token and sends once per webhook batch', async ()
     if (url.includes('/api/v4/contacts/9')) return new Response(JSON.stringify({ custom_fields_values: [{ field_code: 'PHONE', values: [{ value: '+7 918 123 45 67' }] }] }), { status: 200 });
     return new Response('{}', { status: 200 });
   };
-  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_FIELD_ID: '5', STUDIO_ROUTES_JSON: JSON.stringify({ Ставропольская: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'studio@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку' };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_FIELD_ID: '5', STUDIO_ROUTES_JSON: JSON.stringify({ Ставропольская: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'studio@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку', SMS_TEXT_MORNING: 'Утро' };
   const req = { method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({ 'leads[add][0][id]': '123', 'leads[status][0][id]': '123' }) };
   try {
     const response = await handle(req, env);
@@ -73,11 +80,45 @@ test('uses one default sender when studio is not known yet', async () => {
     smsCalls++;
     return new Response('{}', { status: 200 });
   };
-  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Рабочее время', SMS_TEXT_AFTER_HOURS: 'Нерабочее время' };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Рабочее время', SMS_TEXT_MORNING: 'Утро', SMS_TEXT_AFTER_HOURS: 'Нерабочее время' };
   try {
     const response = await handle({ method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({ 'leads[add][0][id]': '123', 'leads[add][0][date_create]': String(Date.parse('2026-09-27T18:30:00Z') / 1000) }) }, env);
     assert.equal(response.body.results[0].state, 'accepted');
     assert.equal(smsCalls, 1);
+  } finally { globalThis.fetch = original; }
+});
+
+test('dispatches morning, day and night texts from the configured environment variables', async () => {
+  const original = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, options) => {
+    if (url.includes('/api/v4/leads/')) return new Response(JSON.stringify({ pipeline_id: 1, status_id: 2, _embedded: { contacts: [{ id: 9, is_main: true }] } }), { status: 200 });
+    if (url.includes('/api/v4/contacts/')) return new Response(JSON.stringify({ custom_fields_values: [{ field_code: 'PHONE', values: [{ value: '+7 918 123 45 67' }] }] }), { status: 200 });
+    sent.push(JSON.parse(options.body));
+    return new Response('{}', { status: 200 });
+  };
+  const env = {
+    WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token',
+    AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2',
+    STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }),
+    SMS_TEXT: 'День', SMS_TEXT_MORNING: 'Утро', SMS_TEXT_AFTER_HOURS: 'Ночь'
+  };
+  try {
+    for (const [id, timestamp] of [
+      ['123', '2026-09-28T06:01:00+03:00'],
+      ['124', '2026-09-28T09:51:00+03:00'],
+      ['125', '2026-09-28T21:30:00+03:00']
+    ]) {
+      const result = await handle({ method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({
+        'leads[status][0][id]': id,
+        'leads[status][0][pipeline_id]': '1',
+        'leads[status][0][status_id]': '2',
+        'leads[status][0][last_modified]': String(Date.parse(timestamp) / 1000)
+      }) }, env);
+      assert.equal(result.body.results[0].state, 'accepted', timestamp);
+    }
+    assert.deepEqual(sent.map(message => message.text), ['Утро', 'День', 'Ночь']);
+    assert.equal(sent.length, 3);
   } finally { globalThis.fetch = original; }
 });
 test('does not use another studio route for an unknown field value', async () => {
@@ -89,7 +130,7 @@ test('does not use another studio route for an unknown field value', async () =>
     smsCalls++;
     return new Response('{}', { status: 200 });
   };
-  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_FIELD_ID: '5', STUDIO_ROUTES_JSON: JSON.stringify({ Ставропольская: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'studio@example.com', apiKey: 'key' }, default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'studio@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку' };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_FIELD_ID: '5', STUDIO_ROUTES_JSON: JSON.stringify({ Ставропольская: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'studio@example.com', apiKey: 'key' }, default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'studio@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку', SMS_TEXT_MORNING: 'Утро' };
   try {
     const response = await handle({ method: 'POST', query: { key: 'secret' }, body: new URLSearchParams({ 'leads[add][0][id]': '123' }) }, env);
     assert.equal(response.body.results[0].state, 'error');
@@ -106,7 +147,7 @@ test('uses the webhook stage when the deal has already moved', async () => {
     smsCalls++;
     return new Response('{}', { status: 200 });
   };
-  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку' };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку', SMS_TEXT_MORNING: 'Утро' };
   try {
     const enteredTarget = new URLSearchParams({ 'leads[status][0][id]': '123', 'leads[status][0][pipeline_id]': '1', 'leads[status][0][status_id]': '2' });
     const result = await handle({ method: 'POST', query: { key: 'secret' }, body: enteredTarget }, env);
@@ -123,7 +164,7 @@ test('ignores an event from another stage even if the deal is now in New', async
     smsCalls++;
     return new Response('{}', { status: 200 });
   };
-  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку' };
+  const env = { WEBHOOK_SECRET: 'secret', AMO_BASE_URL: 'https://example.amocrm.ru', AMO_LONG_LIVED_TOKEN: 'long-token', AMO_PIPELINE_ID: '1', AMO_STATUS_ID: '2', STUDIO_ROUTES_JSON: JSON.stringify({ default: { apiUrl: 'https://company.moizvonki.ru/api/v1', userName: 'sender@example.com', apiKey: 'key' } }), SMS_TEXT: 'Приняли заявку', SMS_TEXT_MORNING: 'Утро' };
   try {
     const otherStage = new URLSearchParams({ 'leads[status][0][id]': '123', 'leads[status][0][pipeline_id]': '1', 'leads[status][0][status_id]': '3' });
     const result = await handle({ method: 'POST', query: { key: 'secret' }, body: otherStage }, env);

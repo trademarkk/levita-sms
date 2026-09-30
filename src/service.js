@@ -36,7 +36,12 @@ export function selectSmsText(event, lead, env, now = Date.now()) {
   const hour = Number(parts.find(part => part.type === 'hour').value);
   const minute = Number(parts.find(part => part.type === 'minute').value);
   const minuteOfDay = hour * 60 + minute;
-  if (minuteOfDay >= 10 * 60 && minuteOfDay < 21 * 60 + 30) return { text: required(env, 'SMS_TEXT'), slot: 'work_hours' };
+  if (minuteOfDay >= 6 * 60 + 1 && minuteOfDay <= 9 * 60 + 50) {
+    const text = env.SMS_TEXT_MORNING?.trim();
+    if (!text) throw new Error('Missing SMS_TEXT_MORNING');
+    return { text, slot: 'morning' };
+  }
+  if (minuteOfDay >= 9 * 60 + 51 && minuteOfDay < 21 * 60 + 30) return { text: required(env, 'SMS_TEXT'), slot: 'work_hours' };
   return { text: env.SMS_TEXT_AFTER_HOURS?.trim() || DEFAULT_AFTER_HOURS_TEXT, slot: 'after_hours' };
 }
 function routeFor(lead, env) {
